@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "m68k",
+  "stdump"
+]

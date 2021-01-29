@@ -1,0 +1,11 @@
+[package]
+name = "stdump"
+version = "0.1.0"
+authors = ["Xiphoseer"]
+edition = "2018"
+
+[dependencies]
+color-eyre = "0.5.10"
+nom = "6.0.1"
+structopt = "0.3.21"
+nom-supreme = "0.4"
