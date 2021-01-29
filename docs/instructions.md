@@ -2,6 +2,7 @@
 
 Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pdf>
 
+```
 0000 xxx1 00 - BTST (dynamic)
 0000 xxx1 01 - BCHG (dynamic)
 0000 xxx1 11 - BSET (dynamic)
@@ -108,3 +109,4 @@ Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pd
 1110 xxx1 00x1 0xxx - ROXL.b
 1110 xxx1 01x1 0xxx - ROXL.w
 1110 xxx1 10x1 0xxx - ROXL.l
+```
