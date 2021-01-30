@@ -9,3 +9,4 @@ color-eyre = "0.5.10"
 nom = "6.0.1"
 structopt = "0.3.21"
 nom-supreme = "0.4"
+m68k = { path = "../m68k" }

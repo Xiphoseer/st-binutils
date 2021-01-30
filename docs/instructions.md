@@ -23,7 +23,9 @@ Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pd
 
 0001 - MOVE.b
 0010 - MOVE.l
+0010 xxx0 01 - MOVEA.l
 0011 - MOVE.w
+0011 xxx0 01 - MOVEA.w
 
 0100 - CHK
 0100 0000 00 - NEGX.b
@@ -50,7 +52,7 @@ Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pd
 0100 1010 11 - TAS
 0100 1010 1111 1100 - ILLEGAL
 
-0100 1100 1x - MOVEM (mem to reg)
+0100 1x00 1x - MOVEM (mem to reg)
 0100 1110 01 - LINK
 0100 1110 0100 xxxx - TRAP
 0100 1110 0101 1xxx - UNLK
@@ -66,7 +68,10 @@ Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pd
 0100 1110 11 - JMP
 0100 xxx1 11 - LEA
 
-0101 - ADDQ, DBcc
+0101 xxx0 00 - ADDQ.b
+0101 xxx0 01 - ADDQ.w
+0101 xxx0 10 - ADDQ.l
+0101 xxxx 11 - DBcc
 0101 xxx1 00 - SUBQ.b
 0101 xxx1 01 - SUBQ.w
 0101 xxx1 10 - SUBQ.l
@@ -75,7 +80,9 @@ Source: <https://web.njit.edu/~rosensta/classes/architecture/252software/code.pd
 0110 0000 - BRA
 0110 0001 - BSR
 0111 xxx0 - MOVEQ
-1000 - DIVS, DIVU, OR
+1000 - OR
+1000 xxx1 11 - DIVS
+1000 xxx0 11 - DIVU.W
 1000 xxx1 0000 - SBCD
 1001 - SUB, SUBA
 1001 xxx1 0000 - SUBX.b

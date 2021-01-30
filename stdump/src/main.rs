@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use m68k::Decoder;
 use nom::{
     bytes::complete::take,
     error::context,
@@ -18,9 +19,13 @@ struct Options {
     /// The PRG file to analyze
     file: PathBuf,
 
-    /// Prints the content of the data section
+    /// Prints the content of the DATA section
     #[structopt(long, short)]
     data: bool,
+
+    /// Prints the content of the TEXT section
+    #[structopt(long, short)]
+    text: bool,
 }
 
 type WORD = u16;
@@ -175,6 +180,25 @@ fn main() -> color_eyre::Result<()> {
             })?;
 
     println!("{:#?}", &prog.header);
+
+    if opts.text {
+        println!("TEXT:");
+        let dec = Decoder::new(&prog.text);
+        for (off, bytes, ins) in dec {
+            print!("{:08x} |", off);
+            let mut cnt = 0;
+            for &byte in bytes {
+                cnt += 1;
+                print!(" {:02x}", byte);
+            }
+            for _ in cnt..=8 {
+                print!("   ");
+            }
+            println!(" | {}", ins);
+        }
+        println!();
+        //print_buf(&prog.text);
+    }
 
     if opts.data {
         println!("DATA:");
