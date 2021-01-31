@@ -140,6 +140,10 @@ pub enum Ins {
     },
     /// BTST
     BitTest(ShiftCount, EffectiveAddr),
+    /// BCLR
+    BitClear(ShiftCount, EffectiveAddr),
+    /// BSET
+    BitSet(ShiftCount, EffectiveAddr),
     /// CMPI
     CompareImmediate {
         size: Size,
@@ -164,6 +168,8 @@ pub enum Ins {
     Clear(Size, EffectiveAddr),
     /// NEG
     Negate(Size, EffectiveAddr),
+    /// NOT
+    Not(Size, EffectiveAddr),
     /// EXT
     SignExtend(Size, DataReg),
     /// MOVEM
@@ -175,6 +181,8 @@ pub enum Ins {
     },
     /// SWAP
     Swap(DataReg),
+    /// NBCD
+    NegateBCD(EffectiveAddr),
     /// TST
     Test { size: Size, ea: EffectiveAddr },
     /// TRAP
@@ -189,6 +197,8 @@ pub enum Ins {
     JumpToSubroutine(EffectiveAddr),
     /// JMP
     Jump(EffectiveAddr),
+    /// DBcc
+    TestDecrementBranch(Condition, DataReg, i16),
     /// BRA
     BranchAlways(i16),
     /// BSR
@@ -223,6 +233,12 @@ pub enum Ins {
         ea: EffectiveAddr,
         flipped: bool,
     },
+    /// SUBA
+    SubAddr {
+        size: Size,
+        reg: AddrReg,
+        ea: EffectiveAddr,
+    },
     /// CMP
     Compare {
         size: Size,
@@ -241,6 +257,18 @@ pub enum Ins {
         areg_x: AddrReg,
         areg_y: AddrReg,
     },
+    /// EOR
+    ExclusiveOr {
+        size: Size,
+        reg: DataReg,
+        ea: EffectiveAddr,
+    },
+    /// MULS, MULU
+    Multiply {
+        signed: bool,
+        reg: DataReg,
+        ea: EffectiveAddr,
+    },
     /// ADDA
     AddAddress {
         size: Size,
@@ -248,12 +276,23 @@ pub enum Ins {
         src: EffectiveAddr,
     },
     /// ASd
-    ArithmeticShift {
+    Shift {
+        kind: ShiftKind,
         dir: ShiftDir,
         size: Size,
         count: ShiftCount,
         reg: DataReg,
     },
+    /// ROd, ROXd
+    Rotate {
+        with_extend: bool,
+        dir: ShiftDir,
+        size: Size,
+        count: ShiftCount,
+        reg: DataReg,
+    },
+    /// ASd <ea>
+    ArithmeticShiftMem { dir: ShiftDir, ea: EffectiveAddr },
 }
 
 impl fmt::Display for Ins {
@@ -264,6 +303,12 @@ impl fmt::Display for Ins {
             }
             Self::BitTest(data, ea) => {
                 write!(f, "BTST {},{}", data, ea)
+            }
+            Self::BitClear(data, ea) => {
+                write!(f, "BCLR {},{}", data, ea)
+            }
+            Self::BitSet(data, ea) => {
+                write!(f, "BSET {},{}", data, ea)
             }
             Self::CompareImmediate { size, data, ea } => {
                 write!(f, "CMPI.{} #{},{}", size, data, ea)
@@ -279,6 +324,7 @@ impl fmt::Display for Ins {
             }
             Self::Clear(size, ea) => write!(f, "CLR.{} {}", size, ea),
             Self::Negate(size, ea) => write!(f, "NEG.{} {}", size, ea),
+            Self::Not(size, ea) => write!(f, "NOT.{} {}", size, ea),
             Self::SignExtend(size, reg) => write!(f, "EXT.{} {}", size, reg),
             Self::MoveMultiple {
                 dir,
@@ -289,7 +335,8 @@ impl fmt::Display for Ins {
                 MoveMultipleDir::RegToMem => write!(f, "MOVEM.{} {:016b} {}", size, mask, ea),
                 MoveMultipleDir::MemToReg => write!(f, "MOVEM.{} {} {:016b}", size, ea, mask),
             },
-            Self::Swap(reg) => write!(f, "SWaP {}", reg),
+            Self::Swap(reg) => write!(f, "SWAP {}", reg),
+            Self::NegateBCD(ea) => write!(f, "NBCD {}", ea),
             Self::Test { size, ea } => write!(f, "TST.{} {}", size, ea),
             Self::Trap(vector) => {
                 write!(f, "TRAP #{}", vector)
@@ -301,7 +348,10 @@ impl fmt::Display for Ins {
             Self::ReturnFromSubroutine => write!(f, "RTS"),
             Self::JumpToSubroutine(ea) => write!(f, "JSR {}", ea),
             Self::Jump(ea) => write!(f, "JMP {}", ea),
-            Self::BranchAlways(disp) => write!(f, "BRA @{}", disp),
+            Self::TestDecrementBranch(cond, reg, disp) => {
+                write!(f, "DB{} {},{}", cond, reg, disp)
+            }
+            Self::BranchAlways(disp) => write!(f, "BRA {}", disp),
             Self::BranchToSubroutine(disp) => write!(f, "BSR @{}", disp),
             Self::Branch(cond, disp) => write!(f, "B{} {}", cond, disp),
             Self::MoveQuick(data, reg) => write!(f, "MOVEQ.l #{},{}", data, reg),
@@ -328,6 +378,7 @@ impl fmt::Display for Ins {
                     write!(f, "{}.{} {},{}", op, size, ea, dreg)
                 }
             }
+            Self::SubAddr { size, reg, ea } => write!(f, "SUBA.{} {},{}", size, ea, reg),
             Self::Compare { size, reg, ea } => write!(f, "CMP.{} {},{}", size, ea, reg),
             Self::CompareAddr { size, reg, ea } => write!(f, "CMPA.{} {},{}", size, ea, reg),
             Self::CompareMultiple {
@@ -335,16 +386,38 @@ impl fmt::Display for Ins {
                 areg_y,
                 areg_x,
             } => write!(f, "CMPM.{} ({})+,({})+", size, areg_y, areg_x),
+            Self::ExclusiveOr { size, reg, ea } => write!(f, "EOR.{} {},{}", size, reg, ea),
+            Self::Multiply { signed, reg, ea } => {
+                let c = if *signed { 'S' } else { 'U' };
+                write!(f, "MUL{}.w {},{}", c, ea, reg)
+            }
             Self::AddAddress { size, src, dest } => {
                 write!(f, "ADDA.{} {},{}", size, src, dest)
             }
-            Self::ArithmeticShift {
+            Self::Shift {
+                kind,
                 dir,
                 size,
                 count,
                 reg,
             } => {
-                write!(f, "AS{}.{} {},{}", dir, size, count, reg)
+                write!(f, "{}S{}.{} {},{}", kind, dir, size, count, reg)
+            }
+            Self::Rotate {
+                with_extend,
+                dir,
+                size,
+                count,
+                reg,
+            } => {
+                if *with_extend {
+                    write!(f, "ROX{}.{} {},{}", dir, size, count, reg)
+                } else {
+                    write!(f, "RO{}.{} {},{}", dir, size, count, reg)
+                }
+            }
+            Self::ArithmeticShiftMem { dir, ea } => {
+                write!(f, "AS{} {}", dir, ea)
             }
         }
     }
@@ -353,9 +426,9 @@ impl fmt::Display for Ins {
 #[derive(Debug, Copy, Clone)]
 pub enum Condition {
     /// RA
-    Always = 0b0000,
+    True = 0b0000,
     /// SR
-    ToSubroutine = 0b0001,
+    False = 0b0001,
     /// HI
     High = 0b0010,
     /// LS
@@ -392,8 +465,8 @@ pub enum Condition {
 impl Condition {
     fn code(&self) -> &'static str {
         match self {
-            Self::Always => "RA",
-            Self::ToSubroutine => "SR",
+            Self::True => "T",
+            Self::False => "F",
             Self::High => "HI",
             Self::LowOrSame => "LS",
 
@@ -424,8 +497,8 @@ impl fmt::Display for Condition {
 impl Condition {
     pub fn from_bits(byte: u8) -> Self {
         match byte & 0b1111 {
-            0b0000 => Self::Always,
-            0b0001 => Self::ToSubroutine,
+            0b0000 => Self::True,
+            0b0001 => Self::False,
             0b0010 => Self::High,
             0b0011 => Self::LowOrSame,
 
@@ -500,6 +573,22 @@ impl fmt::Display for ShiftCount {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShiftKind {
+    Arithmetic,
+    Logical,
+}
+
+impl fmt::Display for ShiftKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arithmetic => write!(f, "A"),
+            Self::Logical => write!(f, "L"),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ALUOp {
     And,

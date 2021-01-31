@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ins::{
     ALUOp, AddrReg, Condition, DataReg, EffectiveAddr, Ins, MoveMultipleDir, Reg, ShiftCount,
-    ShiftDir, Size,
+    ShiftDir, ShiftKind, Size,
 };
 
 pub mod ins;
@@ -227,7 +227,10 @@ impl<'a> Decoder<'a> {
                             Size::Word => self.next_i16().into(),
                             Size::Long => self.next_i32(),
                         };
-                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        /*if second & 0b_0011_1000 == 0b_0000_1000 {
+                            panic!("Unknown ORI {:08b} {:08b}", first, second);
+                        }*/
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT | EAFlags::AN); // FIXME: An not allowed by spec
                         Some(Ins::ALUImmediate {
                             op: ALUOp::Or,
                             size,
@@ -266,6 +269,25 @@ impl<'a> Decoder<'a> {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
                     }
                 }
+                0b_0000_0100 => {
+                    // SUBI
+                    if let Some(size) = size_high(second) {
+                        let data = match size {
+                            Size::Byte => self.next_i8().into(),
+                            Size::Word => self.next_i16().into(),
+                            Size::Long => self.next_i32(),
+                        };
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::ALUImmediate {
+                            op: ALUOp::Sub,
+                            size,
+                            data,
+                            ea,
+                        })
+                    } else {
+                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
                 0b_0000_0110 => {
                     // ADDI
                     if let Some(size) = size_high(second) {
@@ -289,13 +311,21 @@ impl<'a> Decoder<'a> {
                     // BTST, BCHG, BCLR, BSET (static)
                     match second {
                         0b_0000_0000..=0b_0011_1111 => {
-                            let bit = (self.next_u16() & 0b_1111_1111) as u8;
+                            let bit = self.next_u8();
                             let ea = self.lea(second, Size::Long, EAFlags::DATA_ADDR);
                             Some(Ins::BitTest(ShiftCount::Immediate(bit), ea))
                         }
                         0b_0100_0000..=0b_0111_1111 => panic!("BCHG (static) {:08b}", second),
-                        0b_1000_0000..=0b_1011_1111 => panic!("BCLR (static) {:08b}", second),
-                        0b_1100_0000..=0b_1111_1111 => panic!("BSET (static) {:08b}", second),
+                        0b_1000_0000..=0b_1011_1111 => {
+                            let bit = self.next_u8();
+                            let ea = self.lea(second, Size::Long, EAFlags::DATA_ALT);
+                            Some(Ins::BitClear(ShiftCount::Immediate(bit), ea))
+                        }
+                        0b_1100_0000..=0b_1111_1111 => {
+                            let bit = self.next_u8();
+                            let ea = self.lea(second, Size::Long, EAFlags::DATA_ALT);
+                            Some(Ins::BitSet(ShiftCount::Immediate(bit), ea))
+                        }
                     }
                 }
                 0b_0000_1100 => {
@@ -327,7 +357,7 @@ impl<'a> Decoder<'a> {
                                 dest: EffectiveAddr::DataRegDirect(DataReg::from_bits(first >> 1)),
                             }),
                             0b_0100_0000..=0b_0111_1111 => {
-                                assert_ne!(size, Size::Byte);
+                                assert_ne!(size, Size::Byte, "{:08b} {:08b}", first, second);
                                 Some(Ins::MoveAddress {
                                     size,
                                     src: self.lea(second, size, EAFlags::all()),
@@ -411,6 +441,15 @@ impl<'a> Decoder<'a> {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
                     }
                 }
+                0b_0100_0110 => {
+                    // NOT
+                    if let Some(size) = size_high(second) {
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::Not(size, ea))
+                    } else {
+                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
                 //0b_0100_1000 01000 => SWAP
                 0b_0100_1000 | 0b_0100_1100 => {
                     if second & 0b_1000_0000 != 0 {
@@ -450,6 +489,9 @@ impl<'a> Decoder<'a> {
                     } else if first & 0b100 == 0 && second & 0b0111_1000 == 0b_0100_0000 {
                         let reg = DataReg::from_bits(second);
                         Some(Ins::Swap(reg))
+                    } else if first & 0b100 == 0 && second & 0b0100_0000 == 0b_0000_0000 {
+                        let ea = self.lea(second, Size::Long, EAFlags::DATA_ALT);
+                        Some(Ins::NegateBCD(ea))
                     } else {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
                     }
@@ -505,7 +547,15 @@ impl<'a> Decoder<'a> {
                             Some(Ins::AddQuick { size, data, ea })
                         }
                     } else {
-                        panic!("DBcc, Scc: {:08b} {:08b}", first, second);
+                        match second {
+                            0b_1100_1000..=0b_1100_1111 => {
+                                let cond = Condition::from_bits(first);
+                                let reg = DataReg::from_bits(second);
+                                let disp = self.next_i16();
+                                Some(Ins::TestDecrementBranch(cond, reg, disp))
+                            }
+                            _ => panic!("Scc ???: {:08b} {:08b}", first, second),
+                        }
                     }
                 }
                 0b_0110_0000..=0b_0110_1111 => {
@@ -516,8 +566,8 @@ impl<'a> Decoder<'a> {
                         i8::from_be_bytes([second]).into()
                     };
                     match cond {
-                        Condition::Always => Some(Ins::BranchAlways(displacement)),
-                        Condition::ToSubroutine => Some(Ins::BranchToSubroutine(displacement)),
+                        Condition::True => Some(Ins::BranchAlways(displacement)),
+                        Condition::False => Some(Ins::BranchToSubroutine(displacement)),
                         _ => Some(Ins::Branch(cond, displacement)),
                     }
                 }
@@ -575,7 +625,14 @@ impl<'a> Decoder<'a> {
                             flipped,
                         })
                     } else {
-                        panic!("SUBX {:08b} {:08b}", first, second);
+                        let size = if first & 1 == 0 {
+                            Size::Word
+                        } else {
+                            Size::Long
+                        };
+                        let ea = self.lea(second, size, EAFlags::all());
+                        let reg = AddrReg::from_bits(first >> 1);
+                        Some(Ins::SubAddr { size, ea, reg })
                     }
                 }
                 0b_1011_0000..=0b_1011_1111 => {
@@ -584,19 +641,18 @@ impl<'a> Decoder<'a> {
                             let reg = DataReg::from_bits(first >> 1);
                             let ea = self.lea(second, size, EAFlags::all());
                             Some(Ins::Compare { size, reg, ea })
-                        } else {
+                        } else if second & 0b_0011_1000 == 0b0000_1000 {
                             let areg_x = AddrReg::from_bits(first >> 1);
-                            assert_eq!(
-                                second & 0b_0011_1000,
-                                0b0000_1000,
-                                "Only Address Register Direct (001) supported in MOVEM"
-                            );
                             let areg_y = AddrReg::from_bits(second);
                             Some(Ins::CompareMultiple {
                                 size,
                                 areg_x,
                                 areg_y,
                             })
+                        } else {
+                            let reg = DataReg::from_bits(first >> 1);
+                            let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                            Some(Ins::ExclusiveOr { size, reg, ea })
                         }
                     } else {
                         let size = if first & 1 == 0 {
@@ -627,7 +683,10 @@ impl<'a> Decoder<'a> {
                             flipped,
                         })
                     } else {
-                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                        let signed = first & 1 != 0;
+                        let reg = DataReg::from_bits(first >> 1);
+                        let ea = self.lea(second, Size::Word, EAFlags::DATA_ADDR);
+                        Some(Ins::Multiply { signed, reg, ea })
                     }
                 }
                 0b_1101_0000..=0b_1101_1111 => {
@@ -660,27 +719,47 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 0b_1110_0000..=0b_1110_1111 => {
+                    let dir = if first & 1 == 0 {
+                        ShiftDir::Right
+                    } else {
+                        ShiftDir::Left
+                    };
                     // The shifts
                     if let Some(size) = size_high(second) {
-                        let dir = if first & 1 == 0 {
-                            ShiftDir::Right
-                        } else {
-                            ShiftDir::Left
-                        };
                         let count = if second & 0b_0010_0000 == 0 {
                             let val = first >> 1 & 0b111;
                             ShiftCount::Immediate(if val == 0 { 8 } else { val })
                         } else {
                             ShiftCount::Reg(DataReg::from_bits(first >> 1))
                         };
-                        assert_eq!(second & 0b_0001_1000, 0); // FIXME
                         let reg = DataReg::from_bits(second);
-                        Some(Ins::ArithmeticShift {
-                            dir,
-                            size,
-                            count,
-                            reg,
-                        })
+                        if second & 0b1_0000 == 0 {
+                            let kind = if second & 0b1000 == 0 {
+                                ShiftKind::Arithmetic
+                            } else {
+                                ShiftKind::Logical
+                            };
+
+                            Some(Ins::Shift {
+                                kind,
+                                dir,
+                                size,
+                                count,
+                                reg,
+                            })
+                        } else {
+                            let with_extend = second & 0b1000 == 0;
+                            Some(Ins::Rotate {
+                                with_extend,
+                                dir,
+                                size,
+                                count,
+                                reg,
+                            })
+                        }
+                    } else if first & 0b1110 == 0 {
+                        let ea = self.lea(second, Size::Long, EAFlags::MEM_ALT);
+                        Some(Ins::ArithmeticShiftMem { dir, ea })
                     } else {
                         panic!("Memory shifts {:08b} {:08b}", first, second);
                     }
