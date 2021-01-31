@@ -185,7 +185,7 @@ fn main() -> color_eyre::Result<()> {
         println!("TEXT:");
         let dec = Decoder::new(&prog.text);
         for (off, bytes, ins) in dec {
-            print!("{:08x} |", off);
+            print!("{:010} |", off);
             let mut cnt = 0;
             for &byte in bytes {
                 cnt += 1;
