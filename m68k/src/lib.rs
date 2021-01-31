@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use ins::{
-    AddrReg, Condition, DataReg, EffectiveAddr, Ins, MoveMultipleDir, ShiftCount, ShiftDir, Size,
+    ALUOp, AddrReg, Condition, DataReg, EffectiveAddr, Ins, MoveMultipleDir, Reg, ShiftCount,
+    ShiftDir, Size,
 };
 
 pub mod ins;
@@ -70,6 +71,24 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    fn try_next_u8_i8(&mut self) -> Option<(u8, i8)> {
+        let a = *self.inner.next()?;
+        let b = *self.inner.next()?;
+        Some((a, i8::from_be_bytes([b])))
+    }
+
+    fn try_next_i8(&mut self) -> Option<i8> {
+        self.inner.next()?;
+        let b = *self.inner.next()?;
+        Some(i8::from_be_bytes([b]))
+    }
+
+    fn try_next_u8(&mut self) -> Option<u8> {
+        self.inner.next()?;
+        let b = *self.inner.next()?;
+        Some(b)
+    }
+
     fn try_next_i16(&mut self) -> Option<i16> {
         let a = *self.inner.next()?;
         let b = *self.inner.next()?;
@@ -82,6 +101,14 @@ impl<'a> Decoder<'a> {
         Some(u16::from_be_bytes([a, b]))
     }
 
+    fn try_next_i32(&mut self) -> Option<i32> {
+        let a = *self.inner.next()?;
+        let b = *self.inner.next()?;
+        let c = *self.inner.next()?;
+        let d = *self.inner.next()?;
+        Some(i32::from_be_bytes([a, b, c, d]))
+    }
+
     fn try_next_u32(&mut self) -> Option<u32> {
         let a = *self.inner.next()?;
         let b = *self.inner.next()?;
@@ -90,12 +117,29 @@ impl<'a> Decoder<'a> {
         Some(u32::from_be_bytes([a, b, c, d]))
     }
 
+    fn next_i8(&mut self) -> i8 {
+        self.try_next_i8().unwrap()
+    }
+
+    #[allow(unused)]
+    fn next_u8(&mut self) -> u8 {
+        self.try_next_u8().unwrap()
+    }
+
+    fn next_u8_i8(&mut self) -> (u8, i8) {
+        self.try_next_u8_i8().unwrap()
+    }
+
     fn next_i16(&mut self) -> i16 {
         self.try_next_i16().unwrap()
     }
 
     fn next_u16(&mut self) -> u16 {
         self.try_next_u16().unwrap()
+    }
+
+    fn next_i32(&mut self) -> i32 {
+        self.try_next_i32().unwrap()
     }
 
     fn next_u32(&mut self) -> u32 {
@@ -129,6 +173,23 @@ impl<'a> Decoder<'a> {
                 let disp: i16 = self.next_i16();
                 EffectiveAddr::AddrRegIndirectWDispl(disp, AddrReg::from_bits(byte))
             }
+            0b_0011_0000..=0b_0011_0111 => {
+                assert!(flags.contains(EAFlags::ANII));
+                let (mode, disp) = self.next_u8_i8();
+                let areg = AddrReg::from_bits(byte);
+                // FIXME: is this the correct mode decoding?
+                let xreg = if mode & 0b_1000_0000 == 0 {
+                    Reg::Data(DataReg::from_bits(mode >> 4))
+                } else {
+                    Reg::Addr(AddrReg::from_bits(mode >> 4))
+                };
+                let size = if mode & 0b_1000 == 0 {
+                    Size::Word
+                } else {
+                    Size::Long
+                };
+                EffectiveAddr::AddrRegIndirectWIndex(disp, areg, xreg, size)
+            }
             0b_0011_1000 => {
                 assert!(flags.contains(EAFlags::ASD));
                 EffectiveAddr::AbsShortData(self.next_i16())
@@ -158,29 +219,94 @@ impl<'a> Decoder<'a> {
         if let Some(&first) = self.inner.next() {
             let &second = self.inner.next().unwrap();
             match first {
+                0b_0000_0000 => {
+                    // ORI
+                    if let Some(size) = size_high(second) {
+                        let data = match size {
+                            Size::Byte => self.next_i8().into(),
+                            Size::Word => self.next_i16().into(),
+                            Size::Long => self.next_i32(),
+                        };
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::ALUImmediate {
+                            op: ALUOp::Or,
+                            size,
+                            data,
+                            ea,
+                        })
+                    } else {
+                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
+                0b_0000_0001..=0b_0000_1111 if first & 1 == 1 => {
+                    // BTST, BCHG, BCLR, BSET
+                    match second {
+                        0b_0000_0000..=0b_0011_1111 => panic!("BTST {:08b} {:08b}", first, second),
+                        0b_0100_0000..=0b_0111_1111 => panic!("BCHG {:08b} {:08b}", first, second),
+                        0b_1000_0000..=0b_1011_1111 => panic!("BCLR {:08b} {:08b}", first, second),
+                        0b_1100_0000..=0b_1111_1111 => panic!("BSET {:08b} {:08b}", first, second),
+                    }
+                }
+                0b_0000_0010 => {
+                    // ANDI
+                    if let Some(size) = size_high(second) {
+                        let data = match size {
+                            Size::Byte => self.next_i8().into(),
+                            Size::Word => self.next_i16().into(),
+                            Size::Long => self.next_i32(),
+                        };
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::ALUImmediate {
+                            op: ALUOp::And,
+                            size,
+                            data,
+                            ea,
+                        })
+                    } else {
+                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
                 0b_0000_0110 => {
                     // ADDI
                     if let Some(size) = size_high(second) {
-                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
                         let data = match size {
-                            Size::Byte => (self.next_u16() & 0b_1111_1111).into(),
-                            Size::Word => self.next_u16().into(),
-                            Size::Long => self.next_u32(),
+                            Size::Byte => self.next_i8().into(),
+                            Size::Word => self.next_i16().into(),
+                            Size::Long => self.next_i32(),
                         };
-                        Some(Ins::AddImmediate { size, data, ea })
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::ALUImmediate {
+                            op: ALUOp::Add,
+                            size,
+                            data,
+                            ea,
+                        })
                     } else {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
+                0b_0000_1000 => {
+                    // BTST, BCHG, BCLR, BSET (static)
+                    match second {
+                        0b_0000_0000..=0b_0011_1111 => {
+                            let bit = (self.next_u16() & 0b_1111_1111) as u8;
+                            let ea = self.lea(second, Size::Long, EAFlags::DATA_ADDR);
+                            Some(Ins::BitTest(ShiftCount::Immediate(bit), ea))
+                        }
+                        0b_0100_0000..=0b_0111_1111 => panic!("BCHG (static) {:08b}", second),
+                        0b_1000_0000..=0b_1011_1111 => panic!("BCLR (static) {:08b}", second),
+                        0b_1100_0000..=0b_1111_1111 => panic!("BSET (static) {:08b}", second),
                     }
                 }
                 0b_0000_1100 => {
                     // CMPI
                     if let Some(size) = size_high(second) {
-                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
                         let data = match size {
                             Size::Byte => (self.next_u16() & 0b_1111_1111).into(),
                             Size::Word => self.next_u16().into(),
                             Size::Long => self.next_u32(),
                         };
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
                         Some(Ins::CompareImmediate { size, data, ea })
                     } else {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
@@ -261,18 +387,34 @@ impl<'a> Decoder<'a> {
                     //input = rest;
                     //continue;
                 }
+                0b_0100_0000..=0b_0100_1111
+                    if first & 1 == 1 && second & 0b_1100_0000 == 0b_1100_0000 =>
+                {
+                    let reg = AddrReg::from_bits(first >> 1);
+                    let ea = self.lea(second, Size::Byte, EAFlags::CTRL_ADDR);
+                    Some(Ins::LoadEffectiveAddr(ea, reg))
+                }
                 0b_0100_0010 => {
                     if let Some(size) = size_high(second) {
                         let ea = self.lea(second, size, EAFlags::DATA_ADDR);
-                        Some(Ins::Clear(ea))
+                        Some(Ins::Clear(size, ea))
+                    } else {
+                        panic!("Unknown Opcode {:08b} {:08b}", first, second);
+                    }
+                }
+                0b_0100_0100 => {
+                    // NEG
+                    if let Some(size) = size_high(second) {
+                        let ea = self.lea(second, size, EAFlags::DATA_ALT);
+                        Some(Ins::Negate(size, ea))
                     } else {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
                     }
                 }
                 //0b_0100_1000 01000 => SWAP
                 0b_0100_1000 | 0b_0100_1100 => {
-                    if second & 0b_1000_0000 > 0 {
-                        if second & 0b111000 == 0 {
+                    if second & 0b_1000_0000 != 0 {
+                        if first & 0b100 == 0 && second & 0b111000 == 0 {
                             let size = if second & 0b_0100_0000 != 0 {
                                 Size::Long
                             } else {
@@ -305,6 +447,9 @@ impl<'a> Decoder<'a> {
                             ea,
                             mask,
                         })
+                    } else if first & 0b100 == 0 && second & 0b0111_1000 == 0b_0100_0000 {
+                        let reg = DataReg::from_bits(second);
+                        Some(Ins::Swap(reg))
                     } else {
                         panic!("Unknown Opcode {:08b} {:08b}", first, second);
                     }
@@ -334,14 +479,13 @@ impl<'a> Decoder<'a> {
                         }
                         0b_0111_0101 => Some(Ins::ReturnFromSubroutine),
                         0b_1000_0000..=0b1011_1111 => {
-                            let ea = self.lea(
-                                second,
-                                Size::Byte,
-                                EAFlags::ANI | EAFlags::ANIR | EAFlags::AD | EAFlags::PCR,
-                            );
+                            let ea = self.lea(second, Size::Byte, EAFlags::CTRL_ADDR);
                             Some(Ins::JumpToSubroutine(ea))
                         }
-
+                        0b_1100_0000..=0b_1111_1111 => {
+                            let ea = self.lea(second, Size::Long, EAFlags::CTRL_ADDR);
+                            Some(Ins::Jump(ea))
+                        }
                         _ => panic!("SPECIAL: {:08b}", second),
                     }
                 }
@@ -396,14 +540,42 @@ impl<'a> Decoder<'a> {
                             f -= EAFlags::DN;
                         }
                         let ea = self.lea(second, size, f);
-                        Some(Ins::Or {
+                        Some(Ins::ALU {
+                            op: ALUOp::Or,
                             size,
                             dreg,
                             ea,
                             flipped,
                         })
                     } else {
-                        panic!("DIVS / DIVU {:08b} {:08b}", first, second);
+                        let reg = DataReg::from_bits(first >> 1);
+                        let signed = first & 1 != 0;
+                        let ea = self.lea(second, Size::Word, EAFlags::DATA_ADDR);
+                        Some(Ins::Divide { signed, reg, ea })
+                    }
+                }
+                0b_1001_0000..=0b_1001_1111 => {
+                    // SUBs
+                    if let Some(size) = size_high(second) {
+                        let flipped = first & 1 != 0;
+                        let dreg = DataReg::from_bits(first >> 1);
+                        let flags = if flipped {
+                            EAFlags::MEM_ALT
+                        } else if size == Size::Byte {
+                            EAFlags::all() - EAFlags::AN
+                        } else {
+                            EAFlags::all()
+                        };
+                        let ea = self.lea(second, size, flags);
+                        Some(Ins::ALU {
+                            op: ALUOp::Sub,
+                            size,
+                            dreg,
+                            ea,
+                            flipped,
+                        })
+                    } else {
+                        panic!("SUBX {:08b} {:08b}", first, second);
                     }
                 }
                 0b_1011_0000..=0b_1011_1111 => {
@@ -447,7 +619,8 @@ impl<'a> Decoder<'a> {
                         };
                         let dreg = DataReg::from_bits(first >> 1);
                         let ea = self.lea(second, size, flags);
-                        Some(Ins::And {
+                        Some(Ins::ALU {
+                            op: ALUOp::And,
                             size,
                             dreg,
                             ea,
@@ -467,7 +640,8 @@ impl<'a> Decoder<'a> {
                         };
                         let dreg = DataReg::from_bits(first >> 1);
                         let ea = self.lea(second, size, flags);
-                        Some(Ins::Add {
+                        Some(Ins::ALU {
+                            op: ALUOp::Add,
                             size,
                             dreg,
                             ea,
@@ -511,7 +685,7 @@ impl<'a> Decoder<'a> {
                         panic!("Memory shifts {:08b} {:08b}", first, second);
                     }
                 }
-                _ => panic!("{:08b} {:08b}", first, second),
+                _ => panic!("??? {:08b} {:08b}", first, second),
             }
         } else {
             None

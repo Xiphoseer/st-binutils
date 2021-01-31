@@ -1,6 +1,6 @@
 use std::{fmt, hint::unreachable_unchecked};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddrReg {
     A0,
     A1,
@@ -71,6 +71,21 @@ impl fmt::Display for DataReg {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Reg {
+    Addr(AddrReg),
+    Data(DataReg),
+}
+
+impl fmt::Display for Reg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Addr(reg) => write!(f, "{}", reg),
+            Self::Data(reg) => write!(f, "{}", reg),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum EffectiveAddr {
     /// Address Register Direct `An`
@@ -85,6 +100,8 @@ pub enum EffectiveAddr {
     AddrRegIndirectWPredec(AddrReg),
     /// Address Register Indirect with Displacement `(u16, An)`
     AddrRegIndirectWDispl(i16, AddrReg),
+    /// Address Register Indirect with Inde `(u16, Dn, Xn.size)`
+    AddrRegIndirectWIndex(i8, AddrReg, Reg, Size),
     /// Absolute Short Data `<address>.w`
     AbsShortData(i16),
     /// Absolute Long Data `<address>.l`
@@ -102,6 +119,9 @@ impl fmt::Display for EffectiveAddr {
             Self::AddrRegIndirectWPostincr(reg) => write!(f, "({})+", reg),
             Self::AddrRegIndirectWPredec(reg) => write!(f, "-({})", reg),
             Self::AddrRegIndirectWDispl(disp, reg) => write!(f, "{}({})", disp, reg),
+            Self::AddrRegIndirectWIndex(disp, areg, xreg, size) => {
+                write!(f, "({},{},{}.{})", disp, areg, xreg, size)
+            }
             Self::AbsShortData(addr) => write!(f, "{}.w", addr),
             Self::AbsLongData(addr) => write!(f, "{}.l", addr),
             Self::ImmediateData(data) => write!(f, "#{}", data),
@@ -111,12 +131,15 @@ impl fmt::Display for EffectiveAddr {
 
 #[derive(Debug)]
 pub enum Ins {
-    /// ADDI
-    AddImmediate {
+    /// ADDI, ORI
+    ALUImmediate {
+        op: ALUOp,
         size: Size,
-        data: u32,
+        data: i32,
         ea: EffectiveAddr,
     },
+    /// BTST
+    BitTest(ShiftCount, EffectiveAddr),
     /// CMPI
     CompareImmediate {
         size: Size,
@@ -135,8 +158,12 @@ pub enum Ins {
         src: EffectiveAddr,
         dest: EffectiveAddr,
     },
+    /// LEA
+    LoadEffectiveAddr(EffectiveAddr, AddrReg),
     /// CLR
-    Clear(EffectiveAddr),
+    Clear(Size, EffectiveAddr),
+    /// NEG
+    Negate(Size, EffectiveAddr),
     /// EXT
     SignExtend(Size, DataReg),
     /// MOVEM
@@ -146,6 +173,8 @@ pub enum Ins {
         ea: EffectiveAddr,
         mask: u16,
     },
+    /// SWAP
+    Swap(DataReg),
     /// TST
     Test { size: Size, ea: EffectiveAddr },
     /// TRAP
@@ -158,6 +187,8 @@ pub enum Ins {
     ReturnFromSubroutine,
     /// JSR
     JumpToSubroutine(EffectiveAddr),
+    /// JMP
+    Jump(EffectiveAddr),
     /// BRA
     BranchAlways(i16),
     /// BSR
@@ -166,6 +197,12 @@ pub enum Ins {
     Branch(Condition, i16),
     /// MOVEQ
     MoveQuick(i8, DataReg),
+    /// DIVS, DIVU
+    Divide {
+        signed: bool,
+        reg: DataReg,
+        ea: EffectiveAddr,
+    },
     /// ADDQ
     AddQuick {
         size: Size,
@@ -178,15 +215,9 @@ pub enum Ins {
         ea: EffectiveAddr,
         data: u8,
     },
-    /// AND
-    And {
-        size: Size,
-        dreg: DataReg,
-        ea: EffectiveAddr,
-        flipped: bool,
-    },
-    /// OR
-    Or {
+    /// AND, OR, ADD, SUB
+    ALU {
+        op: ALUOp,
         size: Size,
         dreg: DataReg,
         ea: EffectiveAddr,
@@ -210,13 +241,6 @@ pub enum Ins {
         areg_x: AddrReg,
         areg_y: AddrReg,
     },
-    /// ADD
-    Add {
-        size: Size,
-        dreg: DataReg,
-        ea: EffectiveAddr,
-        flipped: bool,
-    },
     /// ADDA
     AddAddress {
         size: Size,
@@ -235,8 +259,11 @@ pub enum Ins {
 impl fmt::Display for Ins {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AddImmediate { size, data, ea } => {
-                write!(f, "ADDI.{} #{},{}", size, data, ea)
+            Self::ALUImmediate { op, size, data, ea } => {
+                write!(f, "{}I.{} #{},{}", op, size, data, ea)
+            }
+            Self::BitTest(data, ea) => {
+                write!(f, "BTST {},{}", data, ea)
             }
             Self::CompareImmediate { size, data, ea } => {
                 write!(f, "CMPI.{} #{},{}", size, data, ea)
@@ -247,7 +274,11 @@ impl fmt::Display for Ins {
             Self::Move { size, src, dest } => {
                 write!(f, "MOVE.{} {},{}", size, src, dest)
             }
-            Self::Clear(ea) => write!(f, "CLR {}", ea),
+            Self::LoadEffectiveAddr(ea, reg) => {
+                write!(f, "LEA {},{}", ea, reg)
+            }
+            Self::Clear(size, ea) => write!(f, "CLR.{} {}", size, ea),
+            Self::Negate(size, ea) => write!(f, "NEG.{} {}", size, ea),
             Self::SignExtend(size, reg) => write!(f, "EXT.{} {}", size, reg),
             Self::MoveMultiple {
                 dir,
@@ -258,6 +289,7 @@ impl fmt::Display for Ins {
                 MoveMultipleDir::RegToMem => write!(f, "MOVEM.{} {:016b} {}", size, mask, ea),
                 MoveMultipleDir::MemToReg => write!(f, "MOVEM.{} {} {:016b}", size, ea, mask),
             },
+            Self::Swap(reg) => write!(f, "SWaP {}", reg),
             Self::Test { size, ea } => write!(f, "TST.{} {}", size, ea),
             Self::Trap(vector) => {
                 write!(f, "TRAP #{}", vector)
@@ -268,38 +300,32 @@ impl fmt::Display for Ins {
             Self::Unlink(areg) => write!(f, "UNLK {}", areg),
             Self::ReturnFromSubroutine => write!(f, "RTS"),
             Self::JumpToSubroutine(ea) => write!(f, "JSR {}", ea),
+            Self::Jump(ea) => write!(f, "JMP {}", ea),
             Self::BranchAlways(disp) => write!(f, "BRA @{}", disp),
             Self::BranchToSubroutine(disp) => write!(f, "BSR @{}", disp),
             Self::Branch(cond, disp) => write!(f, "B{} {}", cond, disp),
             Self::MoveQuick(data, reg) => write!(f, "MOVEQ.l #{},{}", data, reg),
+            Self::Divide { signed, reg, ea } => {
+                let c = if *signed { 'S' } else { 'u' };
+                write!(f, "DIV{}.w {},{}", c, ea, reg)
+            }
             Self::AddQuick { size, data, ea } => {
                 write!(f, "ADDQ.{} #{},{}", size, data, ea)
             }
             Self::SubQuick { size, data, ea } => {
                 write!(f, "SUBQ.{} #{},{}", size, data, ea)
             }
-            Self::And {
+            Self::ALU {
+                op,
                 size,
                 dreg,
                 ea,
                 flipped,
             } => {
                 if *flipped {
-                    write!(f, "AND.{} {},{}", size, dreg, ea)
+                    write!(f, "{}.{} {},{}", op, size, dreg, ea)
                 } else {
-                    write!(f, "AND.{} {},{}", size, ea, dreg)
-                }
-            }
-            Self::Or {
-                size,
-                dreg,
-                ea,
-                flipped,
-            } => {
-                if *flipped {
-                    write!(f, "OR.{} {},{}", size, dreg, ea)
-                } else {
-                    write!(f, "OR.{} {},{}", size, ea, dreg)
+                    write!(f, "{}.{} {},{}", op, size, ea, dreg)
                 }
             }
             Self::Compare { size, reg, ea } => write!(f, "CMP.{} {},{}", size, ea, reg),
@@ -309,18 +335,6 @@ impl fmt::Display for Ins {
                 areg_y,
                 areg_x,
             } => write!(f, "CMPM.{} ({})+,({})+", size, areg_y, areg_x),
-            Self::Add {
-                size,
-                dreg,
-                ea,
-                flipped,
-            } => {
-                if *flipped {
-                    write!(f, "ADD.{} {},{}", size, dreg, ea)
-                } else {
-                    write!(f, "ADD.{} {},{}", size, ea, dreg)
-                }
-            }
             Self::AddAddress { size, src, dest } => {
                 write!(f, "ADDA.{} {},{}", size, src, dest)
             }
@@ -483,6 +497,24 @@ impl fmt::Display for ShiftCount {
         match self {
             Self::Immediate(count) => write!(f, "#{}", count),
             Self::Reg(reg) => write!(f, "{}", reg),
+        }
+    }
+}
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ALUOp {
+    And,
+    Or,
+    Sub,
+    Add,
+}
+
+impl fmt::Display for ALUOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::And => write!(f, "AND"),
+            Self::Or => write!(f, "OR"),
+            Self::Sub => write!(f, "SUB"),
+            Self::Add => write!(f, "ADD"),
         }
     }
 }
