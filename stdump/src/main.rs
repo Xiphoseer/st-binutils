@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use m68k::Decoder;
+use m68k::dis::Decoder;
 use nom::{
     bytes::complete::take,
     error::context,
