@@ -1,2 +1,2 @@
-pub mod isa;
 pub mod dis;
+pub mod isa;

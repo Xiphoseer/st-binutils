@@ -86,7 +86,7 @@ impl fmt::Display for Reg {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EffectiveAddr {
     /// Address Register Direct `An`
     AddrRegDirect(AddrReg),
@@ -105,7 +105,7 @@ pub enum EffectiveAddr {
     /// Absolute Short Data `<address>.w`
     AbsShortData(i16),
     /// Absolute Long Data `<address>.l`
-    AbsLongData(u32),
+    AbsLongData { addr: u32, relocated: bool },
     /// Immediate Data `#<data>`
     ImmediateData(u32),
 }
@@ -123,13 +123,15 @@ impl fmt::Display for EffectiveAddr {
                 write!(f, "({},{},{}.{})", disp, areg, xreg, size)
             }
             Self::AbsShortData(addr) => write!(f, "{}.w", addr),
-            Self::AbsLongData(addr) => write!(f, "{}.l", addr),
+            Self::AbsLongData { addr, relocated } => {
+                write!(f, "{}.l{}", addr, if *relocated { "r" } else { "" })
+            }
             Self::ImmediateData(data) => write!(f, "#{}", data),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum Ins {
     /// ADDI, ORI
     ALUImmediate {
@@ -191,6 +193,8 @@ pub enum Ins {
     LinkAndAllocate { areg: AddrReg, displacement: i16 },
     /// UNLK
     Unlink(AddrReg),
+    /// RTE
+    ReturnFromException,
     /// RTS
     ReturnFromSubroutine,
     /// JSR
@@ -339,12 +343,13 @@ impl fmt::Display for Ins {
             Self::NegateBCD(ea) => write!(f, "NBCD {}", ea),
             Self::Test { size, ea } => write!(f, "TST.{} {}", size, ea),
             Self::Trap(vector) => {
-                write!(f, "TRAP #{}", vector)
+                write!(f, "TRAP #{:<2}", vector)
             }
             Self::LinkAndAllocate { areg, displacement } => {
                 write!(f, "LINK {},#{}", areg, displacement)
             }
             Self::Unlink(areg) => write!(f, "UNLK {}", areg),
+            Self::ReturnFromException => write!(f, "RTE"),
             Self::ReturnFromSubroutine => write!(f, "RTS"),
             Self::JumpToSubroutine(ea) => write!(f, "JSR {}", ea),
             Self::Jump(ea) => write!(f, "JMP {}", ea),
@@ -591,6 +596,7 @@ impl fmt::Display for ShiftKind {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ALUOp {
+    ExclusiveOr,
     And,
     Or,
     Sub,
@@ -600,6 +606,7 @@ pub enum ALUOp {
 impl fmt::Display for ALUOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ExclusiveOr => write!(f, "EOR"),
             Self::And => write!(f, "AND"),
             Self::Or => write!(f, "OR"),
             Self::Sub => write!(f, "SUB"),

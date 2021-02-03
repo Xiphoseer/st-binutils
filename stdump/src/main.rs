@@ -1,18 +1,20 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
-use m68k::dis::Decoder;
-use nom::{
-    bytes::complete::take,
-    error::context,
-    number::complete::{be_u16, be_u32},
-    sequence::tuple,
-    Finish, IResult,
+use m68k::{
+    dis::Decoder,
+    isa::{AddrReg, EffectiveAddr, Ins, Size},
 };
+use nom::{error::context, Finish};
 use nom_supreme::{
-    error::{BaseErrorKind, ErrorTree, Expectation},
+    error::ErrorTree,
     final_parser::{ByteOffset, ExtractContext},
 };
+use parser::{p_prog, Program};
+use stack::{Address, Long, Stack, Word};
 use structopt::StructOpt;
+
+mod parser;
+mod stack;
 
 #[derive(Debug, StructOpt)]
 struct Options {
@@ -26,103 +28,14 @@ struct Options {
     /// Prints the content of the TEXT section
     #[structopt(long, short)]
     text: bool,
-}
 
-type WORD = u16;
-type LONG = u32;
+    /// Sets the offset to start disassembling from
+    #[structopt(long, short)]
+    offset: Option<usize>,
 
-#[derive(Debug)]
-struct PH {
-    /// Branch to start of the program
-    ///
-    /// (must be 0x601a!)
-    ph_branch: WORD,
-
-    /// Length of the TEXT segment
-    ph_tlen: LONG,
-    /// Length of the DATA segment
-    ph_dlen: LONG,
-    /// Length of the BSS segment
-    ph_blen: LONG,
-    /// Length of the symbol table
-    ph_slen: LONG,
-    /// Reserved, should be 0
-    /// Required by PureC
-    ph_res1: LONG,
-    /// Program flags
-    ph_prgflags: LONG,
-    /// 0 = Relocation info present
-    ph_absflag: WORD,
-}
-
-fn p_ph(input: &[u8]) -> IResult<&[u8], PH, ErrorTree<&[u8]>> {
-    let (rest, (ph_branch, ph_tlen, ph_dlen, ph_blen, ph_slen, ph_res1, ph_prgflags, ph_absflag)) =
-        tuple((
-            be_u16, be_u32, be_u32, be_u32, be_u32, be_u32, be_u32, be_u16,
-        ))(input)?;
-    Ok((
-        rest,
-        PH {
-            ph_branch,
-            ph_tlen,
-            ph_dlen,
-            ph_blen,
-            ph_slen,
-            ph_res1,
-            ph_prgflags,
-            ph_absflag,
-        },
-    ))
-}
-
-#[derive(Debug)]
-struct Program<'a> {
-    header: PH,
-    text: &'a [u8],
-    data: &'a [u8],
-    symb: &'a [u8],
-    reloc: Vec<u32>,
-}
-
-fn p_prog(input: &[u8]) -> IResult<&[u8], Program, ErrorTree<&[u8]>> {
-    let (input, header) = context("header", p_ph)(input)?;
-    let (input, (text, data, symb, reloc)) = tuple((
-        context("text", take(header.ph_tlen)),
-        context("data", take(header.ph_dlen)),
-        context("symb", take(header.ph_slen)),
-        context("reloc", p_reloc),
-    ))(input)?;
-    Ok((
-        input,
-        Program {
-            header,
-            text,
-            data,
-            symb,
-            reloc,
-        },
-    ))
-}
-
-fn p_reloc(input: &[u8]) -> IResult<&[u8], Vec<u32>, ErrorTree<&[u8]>> {
-    let (mut input, mut offset) = be_u32(input)?;
-    let mut table = Vec::with_capacity(input.len());
-    table.push(offset);
-    while let Some((&first, rest)) = input.split_first() {
-        match first {
-            0 => return Ok((rest, table)),
-            1 => offset += 254, // or 254?
-            _ => {
-                offset += u32::from(first);
-                table.push(offset);
-            }
-        }
-        input = rest;
-    }
-    Err(nom::Err::Error(ErrorTree::Base {
-        location: input,
-        kind: BaseErrorKind::Expected(Expectation::Eof),
-    }))
+    /// Sets the maximum number of decoded functions
+    #[structopt(long, short)]
+    max: Option<usize>,
 }
 
 fn print_ascii(buf: &[u8]) {
@@ -165,6 +78,168 @@ fn print_buf(buf: &[u8]) {
     }
 }
 
+#[derive(Default, Debug, Copy, Clone)]
+pub struct TextInfo {
+    op: Option<(usize, Ins)>,
+    sr_call: Option<usize>,
+    sr_start: bool,
+}
+
+fn disassemble(prog: &Program, offset: usize, ti_map: &mut BTreeMap<usize, TextInfo>) {
+    let mut stack = Stack::new(&prog.reloc);
+
+    let mut dec = Decoder::new(&prog.text, offset, &prog.reloc);
+    while let Some((off, bytes, ins)) = dec.next() {
+        print!("{:010} |", off);
+        let mut cnt = 0;
+        for &byte in bytes {
+            let base = off + cnt;
+            if prog.reloc.binary_search(&(base as u32)).is_ok() {
+                print!("→");
+            } else {
+                print!(" ");
+            }
+            cnt += 1;
+            print!("{:02x}", byte);
+        }
+        for _ in cnt..=8 {
+            print!("   ");
+        }
+        print!(" | {}", &ins);
+        let info = ti_map.entry(off).or_default();
+        info.op = Some((off, ins));
+        match ins {
+            Ins::ReturnFromSubroutine => {
+                break;
+            }
+            Ins::BranchToSubroutine(offset) => {
+                let target: usize = (off + 2).wrapping_add(offset as usize);
+                info.sr_call = Some(target);
+                ti_map.entry(target).or_default().sr_start = true;
+                print!("                sr{}()", target);
+            }
+            Ins::AddAddress { size, src, dest } => {
+                if dest == AddrReg::SP {
+                    assert_eq!(size, Size::Long);
+                    match src {
+                        EffectiveAddr::ImmediateData(off) => stack.discard(off),
+                        _ => print!(" <--??-->"),
+                    }
+                }
+            }
+            Ins::MoveAddress { size, src, dest } => {
+                if dest == AddrReg::SP {
+                    assert_eq!(size, Size::Long);
+                    match src {
+                        EffectiveAddr::ImmediateData(off) => stack.set_base(Address::Fixed(off)),
+                        _ => panic!("{:?}", src),
+                    }
+                } else if src == EffectiveAddr::AddrRegDirect(AddrReg::SP) {
+                }
+            }
+            Ins::Move { size, src, dest } => {
+                if let EffectiveAddr::AddrRegIndirectWPredec(AddrReg::SP) = dest {
+                    stack.push(size, src);
+                }
+            }
+            Ins::Jump(ea) => {
+                if let EffectiveAddr::AbsLongData { addr, relocated } = ea {
+                    if relocated {
+                        println!();
+                        dec.reset(addr as usize);
+                    } else {
+                        print!(" <---STOP--->");
+                        break;
+                    }
+                } else {
+                    print!(" <---STOP--->");
+                    break;
+                }
+            }
+            Ins::JumpToSubroutine(ea) => {
+                if let EffectiveAddr::AbsLongData { addr, relocated } = ea {
+                    if relocated {
+                        let target = addr as usize;
+                        info.sr_call = Some(target);
+                        ti_map.entry(target).or_default().sr_start = true;
+                    } else {
+                        print!(" <---??r??--->");
+                    }
+                } else {
+                    print!(" <---????--->");
+                }
+            }
+            Ins::AddQuick { size: _, ea, data } => {
+                if ea == EffectiveAddr::AddrRegDirect(AddrReg::SP) {
+                    stack.discard(data as u32);
+                }
+            }
+            Ins::Trap(trap) => match trap {
+                1 => {
+                    let arg = stack.word_at(0);
+                    if let Word::Immediate(val) = arg {
+                        match val {
+                            9 => {
+                                let buf = stack.long_at(2);
+                                print!("               Cconws({}) <<GEMDOS>>", buf);
+                            }
+                            49 => {
+                                let keepcnt = stack.long_at(2);
+                                let retcode = stack.word_at(6);
+                                print!(
+                                    "               Ptermres({},{}) <<GEMDOS>>",
+                                    keepcnt, retcode
+                                );
+                                stack.discard(8);
+                                break;
+                            }
+                            74 => {
+                                let _ = stack.word_at(2);
+                                let block = stack.long_at(4);
+                                let newsiz = stack.long_at(8);
+                                print!("               Mshrink({},{}) <<GEMDOS>>", block, newsiz);
+                            }
+                            _ => {
+                                println!("               GEMDOS #{}", val);
+                                break;
+                            }
+                        }
+                    }
+                }
+                14 => {
+                    let val = stack.word_at(0);
+                    match val {
+                        Word::Immediate(38) => {
+                            let func = stack.long_at(2);
+                            print!("               Supexec({})", func);
+
+                            if let Long::Immediate(off) = func {
+                                let target = off as usize;
+                                info.sr_call = Some(target);
+                                ti_map.entry(target).or_default().sr_start = true;
+                            } else {
+                                print!(" <TODO>");
+                            }
+                        }
+                        _ => {
+                            print!("               XBIOS #{}", val);
+                        }
+                    }
+                }
+                _ => print!("               <<???>>"),
+            },
+            _ => {
+                // TODO
+            }
+        }
+        println!();
+    }
+    println!();
+
+    println!();
+    println!("Stack: {}", stack);
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let opts: Options = Options::from_args();
@@ -182,28 +257,51 @@ fn main() -> color_eyre::Result<()> {
     println!("{:#?}", &prog.header);
 
     if opts.text {
-        println!("TEXT:");
-        let dec = Decoder::new(&prog.text);
-        for (off, bytes, ins) in dec {
-            print!("{:010} |", off);
-            let mut cnt = 0;
-            for &byte in bytes {
-                cnt += 1;
-                print!(" {:02x}", byte);
-            }
-            for _ in cnt..=8 {
-                print!("   ");
-            }
-            println!(" | {}", ins);
-        }
+        let mut ti_map: BTreeMap<usize, TextInfo> = BTreeMap::new();
+
+        let offset = opts.offset.unwrap_or(0);
+        ti_map.entry(offset).or_default().sr_start = true;
         println!();
+        println!("## Text:");
+        println!();
+
+        let mut cnt = 0;
+        while let Some(offset) = ti_map
+            .iter()
+            .find(|(_, &ti)| ti.op.is_none() && ti.sr_start)
+            .map(|(&at, _)| at)
+        {
+            println!("Next SR: {}", offset);
+            disassemble(&prog, offset, &mut ti_map);
+
+            cnt += 1;
+            if let Some(max) = opts.max {
+                if cnt >= max {
+                    break;
+                }
+            }
+        }
+
+        println!("Branches:");
+        for (&at, ti) in &ti_map {
+            if let Some(target) = ti.sr_call {
+                println!("- {} ==> {}", at, target);
+            }
+        }
+
         //print_buf(&prog.text);
     }
 
     if opts.data {
-        println!("DATA:");
+        println!();
+        println!("## Misc");
+        println!();
         print_buf(&prog.data);
     }
+
+    println!();
+    println!("## Misc");
+    println!();
 
     println!("#relocations: {}", &prog.reloc.len());
     println!("remaining: {:?} bytes", _rest);
