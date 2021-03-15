@@ -1,5 +1,7 @@
 [workspace]
 members = [
   "m68k",
-  "stdump"
+  "stdump",
+  "libtos",
+  "stan",
 ]
